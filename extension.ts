@@ -8,10 +8,7 @@ import * as PanelMenu from "resource:///org/gnome/shell/ui/panelMenu.js";
 import * as PopupMenu from "resource:///org/gnome/shell/ui/popupMenu.js";
 import * as Main from "resource:///org/gnome/shell/ui/main.js";
 
-import {
-    Extension,
-    ExtensionMetadata,
-} from "resource:///org/gnome/shell/extensions/extension.js";
+import { Extension } from "resource:///org/gnome/shell/extensions/extension.js";
 
 const TB_DESKTOP_IDS = [
     "thunderbird.desktop",
@@ -26,13 +23,8 @@ export default class ThunderbirdTrayExtension extends Extension {
     private _indicator: PanelMenu.Button | null = null;
     private _icon: St.Icon | null = null;
     private _toggleItem: PopupMenu.PopupMenuItem | null = null;
-    private _menuOpenStateId: number | null = null;
 
     private _windows: Set<Meta.Window> = new Set();
-    private _windowSignals: Map<Meta.Window, number[]> = new Map();
-    private _windowCreatedId: number | null = null;
-    // Primary detection path: fires after the app is fully initialized on Wayland
-    private _appStateChangedId: number | null = null;
 
     // Set during quit to suppress headless respawn
     private _quitting = false;
@@ -44,13 +36,8 @@ export default class ThunderbirdTrayExtension extends Extension {
     // True when we detected a pre-existing headless TB we didn't spawn (e.g. after extension reload)
     private _externalHeadless = false;
 
-    constructor(metadata: ExtensionMetadata) {
-        super(metadata);
-    }
-
     enable() {
         this._windows = new Set();
-        this._windowSignals = new Map();
         this._quitting = false;
 
         this._indicator = new PanelMenu.Button(0.0, this.metadata.name, false);
@@ -68,34 +55,31 @@ export default class ThunderbirdTrayExtension extends Extension {
         }
         if (this._windows.size === 0) this._detectExternalHeadless();
 
-        // Primary: app-state-changed fires after the app is fully set up
-        this._appStateChangedId = Shell.AppSystem.get_default().connect(
+        // Primary: app-state-changed fires after the app is fully set up on Wayland
+        Shell.AppSystem.get_default().connectObject(
             "app-state-changed",
             (_appSys: Shell.AppSystem, app: Shell.App) => {
                 if (!this._isThunderbirdApp(app)) return;
                 for (const w of app.get_windows()) this._trackWindow(w);
-            }
+            },
+            this
         );
 
         // Secondary: window-created works for additional windows once the app is running
-        this._windowCreatedId = global.display.connect(
+        global.display.connectObject(
             "window-created",
             (_display: Meta.Display, window: Meta.Window) =>
-                this._onWindowCreated(window)
+                this._onWindowCreated(window),
+            this
         );
 
         this._updateIndicator();
     }
 
     disable() {
-        if (this._appStateChangedId !== null) {
-            Shell.AppSystem.get_default().disconnect(this._appStateChangedId);
-            this._appStateChangedId = null;
-        }
-        if (this._windowCreatedId !== null) {
-            global.display.disconnect(this._windowCreatedId);
-            this._windowCreatedId = null;
-        }
+        Shell.AppSystem.get_default().disconnectObject(this);
+        global.display.disconnectObject(this);
+
         if (this._headlessTimerId !== null) {
             GLib.source_remove(this._headlessTimerId);
             this._headlessTimerId = null;
@@ -111,18 +95,8 @@ export default class ThunderbirdTrayExtension extends Extension {
         this._headlessProc = null;
         this._externalHeadless = false;
 
-        for (const [window, signals] of this._windowSignals) {
-            for (const id of signals) window.disconnect(id);
-        }
-        this._windowSignals.clear();
+        for (const window of this._windows) window.disconnectObject(this);
         this._windows.clear();
-
-        if (this._menuOpenStateId !== null && this._indicator !== null) {
-            (this._indicator.menu as PopupMenu.PopupMenu).disconnect(
-                this._menuOpenStateId
-            );
-            this._menuOpenStateId = null;
-        }
 
         // Destroy children before the parent so Clutter doesn't double-destroy
         this._toggleItem?.destroy();
@@ -138,25 +112,38 @@ export default class ThunderbirdTrayExtension extends Extension {
         const menu = this._indicator.menu as PopupMenu.PopupMenu;
 
         this._toggleItem = new PopupMenu.PopupMenuItem("Open Thunderbird");
-        this._toggleItem.connect("activate", this._toggleWindow.bind(this));
+        this._toggleItem.connectObject(
+            "activate",
+            this._toggleWindow.bind(this),
+            this
+        );
         menu.addMenuItem(this._toggleItem);
 
         menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         const closeToTrayItem = new PopupMenu.PopupMenuItem("Close to Tray");
-        closeToTrayItem.connect("activate", this._closeToTrayNow.bind(this));
+        closeToTrayItem.connectObject(
+            "activate",
+            this._closeToTrayNow.bind(this),
+            this
+        );
         menu.addMenuItem(closeToTrayItem);
 
         const quitItem = new PopupMenu.PopupMenuItem("Quit Thunderbird");
-        quitItem.connect("activate", this._quitThunderbird.bind(this));
+        quitItem.connectObject(
+            "activate",
+            this._quitThunderbird.bind(this),
+            this
+        );
         menu.addMenuItem(quitItem);
 
-        this._menuOpenStateId = menu.connect(
+        menu.connectObject(
             "open-state-changed",
             (_menu: PopupMenu.PopupMenu, isOpen: boolean) => {
                 if (isOpen) this._updateIndicator();
                 return undefined;
-            }
+            },
+            this
         );
     }
 
@@ -194,12 +181,13 @@ export default class ThunderbirdTrayExtension extends Extension {
         }
 
         this._windows.add(window);
-
-        const signals: number[] = [
-            window.connect("unmanaging", () => this._onWindowUnmanaging(window)),
-            window.connect("notify::minimized", () => this._updateIndicator()),
-        ];
-        this._windowSignals.set(window, signals);
+        window.connectObject(
+            "unmanaging",
+            () => this._onWindowUnmanaging(window),
+            "notify::minimized",
+            () => this._updateIndicator(),
+            this
+        );
         this._updateIndicator();
     }
 
@@ -209,11 +197,7 @@ export default class ThunderbirdTrayExtension extends Extension {
     }
 
     private _onWindowUnmanaging(window: Meta.Window): void {
-        const signals = this._windowSignals.get(window);
-        if (signals) {
-            for (const id of signals) window.disconnect(id);
-            this._windowSignals.delete(window);
-        }
+        window.disconnectObject(this);
         this._windows.delete(window);
 
         if (!this._quitting && this._windows.size === 0) {
@@ -353,7 +337,11 @@ export default class ThunderbirdTrayExtension extends Extension {
             proc.wait_async(null, (_p, result) => {
                 try {
                     proc.wait_finish(result);
-                    if (proc.get_successful() && this._windows.size === 0 && this._headlessProc === null) {
+                    if (
+                        proc.get_successful() &&
+                        this._windows.size === 0 &&
+                        this._headlessProc === null
+                    ) {
                         this._externalHeadless = true;
                         this._updateIndicator();
                     }
