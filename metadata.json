@@ -1,0 +1,15 @@
+{
+  "name": "Thunderbird Tray",
+  "description": "Start Thunderbird headless when closing main Thunderbird",
+  "uuid": "thunderbird-tray@domgregori.github.com",
+  "shell-version": [
+    "45",
+    "46",
+    "47",
+    "48",
+    "49",
+    "50"
+  ],
+  "url": "https://github.com/domgregori/thunderbird-tray",
+  "version": 1
+}
