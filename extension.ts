@@ -10,6 +10,9 @@ import * as Main from "resource:///org/gnome/shell/ui/main.js";
 
 import { Extension } from "resource:///org/gnome/shell/extensions/extension.js";
 
+Gio._promisify(Gio.Subprocess.prototype, "communicate_utf8_async");
+Gio._promisify(Gio.Subprocess.prototype, "wait_async");
+
 const TB_DESKTOP_IDS = [
     "thunderbird.desktop",
     "org.mozilla.Thunderbird.desktop",
@@ -35,6 +38,7 @@ export default class ThunderbirdTrayExtension extends Extension {
     private _headlessWatchCancellable: Gio.Cancellable | null = null;
     // True when we detected a pre-existing headless TB we didn't spawn (e.g. after extension reload)
     private _externalHeadless = false;
+    private _externalHeadlessPid: number | null = null;
 
     enable() {
         this._windows = new Set();
@@ -94,6 +98,7 @@ export default class ThunderbirdTrayExtension extends Extension {
         this._headlessWatchCancellable = null;
         this._headlessProc = null;
         this._externalHeadless = false;
+        this._externalHeadlessPid = null;
 
         for (const window of this._windows) window.disconnectObject(this);
         this._windows.clear();
@@ -174,6 +179,7 @@ export default class ThunderbirdTrayExtension extends Extension {
 
         // A TB window appeared — clear all headless tracking
         this._externalHeadless = false;
+        this._externalHeadlessPid = null;
         if (this._headlessProc !== null) {
             this._headlessWatchCancellable?.cancel();
             this._headlessWatchCancellable = null;
@@ -221,7 +227,7 @@ export default class ThunderbirdTrayExtension extends Extension {
         );
     }
 
-    private _startHeadless(): void {
+    private async _startHeadless(): Promise<void> {
         if (this._headlessProc !== null) return;
 
         try {
@@ -233,53 +239,72 @@ export default class ThunderbirdTrayExtension extends Extension {
             this._headlessProc = proc;
             this._headlessWatchCancellable = new Gio.Cancellable();
 
-            proc.wait_async(this._headlessWatchCancellable, (_p, result) => {
-                this._headlessWatchCancellable = null;
-                try {
-                    proc.wait_finish(result);
-                } catch (_e) {
-                    return; // Cancelled — intentional stop in progress
-                }
-                if (this._headlessProc === proc) {
-                    this._headlessProc = null;
-                    // Respawn if it crashed unexpectedly (e.g. on sleep/wake)
-                    if (!this._quitting && this._windows.size === 0) {
-                        this._scheduleHeadless();
-                    }
-                    this._updateIndicator();
-                }
-            });
-
             Main.notify("Thunderbird", "Running in background");
             this._updateIndicator();
+
+            try {
+                await proc.wait_async(this._headlessWatchCancellable);
+            } catch (_e) {
+                return; // Cancelled — intentional stop in progress
+            }
+
+            this._headlessWatchCancellable = null;
+
+            if (this._headlessProc === proc) {
+                this._headlessProc = null;
+                // Respawn if it crashed unexpectedly (e.g. on sleep/wake)
+                if (!this._quitting && this._windows.size === 0) {
+                    this._scheduleHeadless();
+                }
+                this._updateIndicator();
+            }
         } catch (e) {
             console.error(`thunderbird-tray: failed to start headless: ${e}`);
         }
     }
 
-    private _stopHeadlessAndLaunch(): void {
-        if (this._headlessProc === null) {
-            GLib.spawn_command_line_async("thunderbird");
-            return;
-        }
+    private async _stopHeadlessAndLaunch(): Promise<void> {
+        if (this._headlessProc !== null) {
+            this._headlessWatchCancellable?.cancel();
+            this._headlessWatchCancellable = null;
 
-        this._headlessWatchCancellable?.cancel();
-        this._headlessWatchCancellable = null;
+            const proc = this._headlessProc;
+            this._headlessProc = null;
+            this._updateIndicator();
 
-        const proc = this._headlessProc;
-        this._headlessProc = null;
-        this._updateIndicator();
-
-        proc.send_signal(15); // SIGTERM
-
-        proc.wait_async(null, (_p, result) => {
+            proc.send_signal(15); // SIGTERM
             try {
-                proc.wait_finish(result);
+                await proc.wait_async(null);
             } catch (_e) {
                 // Already exited — launch anyway
             }
             GLib.spawn_command_line_async("thunderbird");
-        });
+            return;
+        }
+
+        if (this._externalHeadless) {
+            const pid = this._externalHeadlessPid;
+            this._externalHeadless = false;
+            this._externalHeadlessPid = null;
+            this._updateIndicator();
+
+            if (pid !== null) {
+                try {
+                    const killProc = Gio.Subprocess.new(
+                        ["kill", "-15", String(pid)],
+                        Gio.SubprocessFlags.STDOUT_SILENCE |
+                            Gio.SubprocessFlags.STDERR_SILENCE
+                    );
+                    await killProc.wait_async(null);
+                } catch (e) {
+                    console.error(`thunderbird-tray: failed to kill external headless (pid ${pid}): ${e}`);
+                }
+            }
+            GLib.spawn_command_line_async("thunderbird");
+            return;
+        }
+
+        GLib.spawn_command_line_async("thunderbird");
     }
 
     private _toggleWindow(): void {
@@ -309,14 +334,27 @@ export default class ThunderbirdTrayExtension extends Extension {
 
     private _quitThunderbird(): void {
         this._quitting = true;
-        this._externalHeadless = false;
 
         if (this._headlessProc !== null) {
             this._headlessWatchCancellable?.cancel();
             this._headlessWatchCancellable = null;
             this._headlessProc.send_signal(15);
             this._headlessProc = null;
+        } else if (this._externalHeadless && this._externalHeadlessPid !== null) {
+            // Fire-and-forget SIGTERM — no need to wait before closing windows
+            try {
+                Gio.Subprocess.new(
+                    ["kill", "-15", String(this._externalHeadlessPid)],
+                    Gio.SubprocessFlags.STDOUT_SILENCE |
+                        Gio.SubprocessFlags.STDERR_SILENCE
+                );
+            } catch (e) {
+                console.error(`thunderbird-tray: failed to kill external headless (pid ${this._externalHeadlessPid}): ${e}`);
+            }
+            this._externalHeadlessPid = null;
         }
+
+        this._externalHeadless = false;
 
         const time = global.get_current_time();
         for (const window of this._windows) window.delete(time);
@@ -326,28 +364,32 @@ export default class ThunderbirdTrayExtension extends Extension {
             this._quitTimerId = null;
             return GLib.SOURCE_REMOVE;
         });
+
+        this._updateIndicator();
     }
 
-    private _detectExternalHeadless(): void {
+    private async _detectExternalHeadless(): Promise<void> {
         try {
             const proc = Gio.Subprocess.new(
                 ["pgrep", "thunderbird"],
-                Gio.SubprocessFlags.STDOUT_SILENCE | Gio.SubprocessFlags.STDERR_SILENCE
+                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE
             );
-            proc.wait_async(null, (_p, result) => {
-                try {
-                    proc.wait_finish(result);
-                    if (
-                        proc.get_successful() &&
-                        this._windows.size === 0 &&
-                        this._headlessProc === null
-                    ) {
-                        this._externalHeadless = true;
-                        this._updateIndicator();
-                    }
-                } catch (_e) {}
-            });
-        } catch (_e) {}
+            const [stdout] = await proc.communicate_utf8_async(null, null);
+            if (
+                this._windows.size === 0 &&
+                this._headlessProc === null &&
+                stdout
+            ) {
+                const pid = parseInt(stdout.trim().split("\n")[0], 10);
+                if (!isNaN(pid)) {
+                    this._externalHeadlessPid = pid;
+                    this._externalHeadless = true;
+                    this._updateIndicator();
+                }
+            }
+        } catch (e) {
+            console.error(`thunderbird-tray: failed to detect external headless: ${e}`);
+        }
     }
 
     private _updateIndicator(): void {
