@@ -289,15 +289,13 @@ export default class ThunderbirdTrayExtension extends Extension {
             this._updateIndicator();
 
             if (pid !== null) {
-                try {
-                    const killProc = Gio.Subprocess.new(
-                        ["kill", "-15", String(pid)],
-                        Gio.SubprocessFlags.STDOUT_SILENCE |
-                            Gio.SubprocessFlags.STDERR_SILENCE
-                    );
-                    await killProc.wait_async(null);
-                } catch (e) {
-                    console.error(`thunderbird-tray: failed to kill external headless (pid ${pid}): ${e}`);
+                const killProc = this._spawnKillSignal(pid);
+                if (killProc) {
+                    try {
+                        await killProc.wait_async(null);
+                    } catch (_e) {
+                        // Already exited
+                    }
                 }
             }
             GLib.spawn_command_line_async("thunderbird");
@@ -342,15 +340,7 @@ export default class ThunderbirdTrayExtension extends Extension {
             this._headlessProc = null;
         } else if (this._externalHeadless && this._externalHeadlessPid !== null) {
             // Fire-and-forget SIGTERM — no need to wait before closing windows
-            try {
-                Gio.Subprocess.new(
-                    ["kill", "-15", String(this._externalHeadlessPid)],
-                    Gio.SubprocessFlags.STDOUT_SILENCE |
-                        Gio.SubprocessFlags.STDERR_SILENCE
-                );
-            } catch (e) {
-                console.error(`thunderbird-tray: failed to kill external headless (pid ${this._externalHeadlessPid}): ${e}`);
-            }
+            this._spawnKillSignal(this._externalHeadlessPid);
             this._externalHeadlessPid = null;
         }
 
@@ -366,6 +356,18 @@ export default class ThunderbirdTrayExtension extends Extension {
         });
 
         this._updateIndicator();
+    }
+
+    private _spawnKillSignal(pid: number): Gio.Subprocess | null {
+        try {
+            return Gio.Subprocess.new(
+                ["kill", "-15", String(pid)],
+                Gio.SubprocessFlags.STDOUT_SILENCE | Gio.SubprocessFlags.STDERR_SILENCE
+            );
+        } catch (e) {
+            console.error(`thunderbird-tray: failed to kill external headless (pid ${pid}): ${e}`);
+            return null;
+        }
     }
 
     private async _detectExternalHeadless(): Promise<void> {
