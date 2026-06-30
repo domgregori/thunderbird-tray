@@ -1,7 +1,7 @@
 NAME=thunderbird-tray
 DOMAIN=domgregori.github.com
 
-.PHONY: all pack errortest install installfromzip debug upload clean cleanall
+.PHONY: all pack errortest install installfromzip uninstall debug upload clean cleanall
 
 all: dist/extension.js
 
@@ -28,6 +28,9 @@ install: $(NAME).zip
 installfromzip: $(NAME).zip
 	@gnome-extensions install $(NAME).zip --force
 	@gnome-extensions enable $(NAME)@$(DOMAIN)
+
+uninstall:
+	gnome-extensions uninstall $(NAME)@$(DOMAIN)
 
 debug: $(NAME).zip install
 	@([ -f /usr/lib/mutter-devkit ] || { echo "mutter-devkit not installed" >&2; exit 1; })

@@ -26,6 +26,9 @@ export default class ThunderbirdTrayExtension extends Extension {
     private _indicator: PanelMenu.Button | null = null;
     private _icon: St.Icon | null = null;
     private _toggleItem: PopupMenu.PopupMenuItem | null = null;
+    private _startHeadlessItem: PopupMenu.PopupMenuItem | null = null;
+    private _closeToTrayItem: PopupMenu.PopupMenuItem | null = null;
+    private _quitItem: PopupMenu.PopupMenuItem | null = null;
 
     private _windows: Set<Meta.Window> = new Set();
 
@@ -106,6 +109,12 @@ export default class ThunderbirdTrayExtension extends Extension {
         // Destroy children before the parent so Clutter doesn't double-destroy
         this._toggleItem?.destroy();
         this._toggleItem = null;
+        this._startHeadlessItem?.destroy();
+        this._startHeadlessItem = null;
+        this._closeToTrayItem?.destroy();
+        this._closeToTrayItem = null;
+        this._quitItem?.destroy();
+        this._quitItem = null;
         this._icon?.destroy();
         this._icon = null;
         this._indicator?.destroy();
@@ -126,21 +135,29 @@ export default class ThunderbirdTrayExtension extends Extension {
 
         menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
-        const closeToTrayItem = new PopupMenu.PopupMenuItem("Close to Tray");
-        closeToTrayItem.connectObject(
+        this._startHeadlessItem = new PopupMenu.PopupMenuItem("Start Headless");
+        this._startHeadlessItem.connectObject(
+            "activate",
+            this._startHeadless.bind(this),
+            this
+        );
+        menu.addMenuItem(this._startHeadlessItem);
+
+        this._closeToTrayItem = new PopupMenu.PopupMenuItem("Close to Tray");
+        this._closeToTrayItem.connectObject(
             "activate",
             this._closeToTrayNow.bind(this),
             this
         );
-        menu.addMenuItem(closeToTrayItem);
+        menu.addMenuItem(this._closeToTrayItem);
 
-        const quitItem = new PopupMenu.PopupMenuItem("Quit Thunderbird");
-        quitItem.connectObject(
+        this._quitItem = new PopupMenu.PopupMenuItem("Quit Thunderbird");
+        this._quitItem.connectObject(
             "activate",
             this._quitThunderbird.bind(this),
             this
         );
-        menu.addMenuItem(quitItem);
+        menu.addMenuItem(this._quitItem);
 
         menu.connectObject(
             "open-state-changed",
@@ -228,7 +245,7 @@ export default class ThunderbirdTrayExtension extends Extension {
     }
 
     private async _startHeadless(): Promise<void> {
-        if (this._headlessProc !== null) return;
+        if (this._headlessProc !== null || this._windows.size > 0) return;
 
         try {
             const proc = Gio.Subprocess.new(
@@ -403,6 +420,12 @@ export default class ThunderbirdTrayExtension extends Extension {
         const allMinimized = hasWindows && windows.every((w) => w.minimized);
 
         this._icon.opacity = hasWindows || isHeadless ? 255 : 128;
+        if (this._startHeadlessItem)
+            this._startHeadlessItem.visible = !hasWindows && !isHeadless;
+        if (this._closeToTrayItem)
+            this._closeToTrayItem.visible = hasWindows;
+        if (this._quitItem)
+            this._quitItem.visible = hasWindows || isHeadless;
 
         if (!hasWindows && !isHeadless) {
             this._toggleItem.label.text = "Open Thunderbird";
